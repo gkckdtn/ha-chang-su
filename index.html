@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>라벨링 스튜디오</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">AI</div>
+      <div>
+        <h1>라벨링 스튜디오</h1>
+        <p>CVAT 스타일의 라벨링 &amp; 오토 라벨링 데모</p>
+      </div>
+    </div>
+    <div class="actions">
+      <button id="exportBtn" class="ghost">JSON 내보내기</button>
+      <button id="resetBtn" class="danger ghost">모든 데이터 초기화</button>
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="panel">
+      <div class="panel-header">
+        <h2>프로젝트</h2>
+        <span class="pill" id="projectCount"></span>
+      </div>
+      <form id="projectForm" class="card">
+        <label>프로젝트 이름</label>
+        <input id="projectName" placeholder="예: 도로 표지판" required />
+        <label>설명</label>
+        <textarea id="projectDescription" placeholder="데이터셋에 대한 메모를 남겨주세요"></textarea>
+        <label>카테고리(쉼표 구분)</label>
+        <input id="projectLabels" placeholder="car, person, traffic-light" />
+        <button type="submit">프로젝트 생성</button>
+      </form>
+
+      <div class="card">
+        <div class="section-title">
+          <h3>프로젝트 목록</h3>
+        </div>
+        <ul id="projectList" class="list"></ul>
+      </div>
+
+      <div class="card">
+        <div class="section-title">
+          <h3>레이블</h3>
+          <button id="addLabelBtn" class="ghost small">추가</button>
+        </div>
+        <ul id="labelList" class="pill-list"></ul>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2>이미지 &amp; 태스크</h2>
+        <span class="pill" id="imageCount"></span>
+      </div>
+      <div class="card upload">
+        <div>
+          <p class="muted">이미지를 업로드하거나 드래그 앤 드롭하세요.</p>
+          <p class="muted">PNG/JPEG 지원, 모든 데이터는 브라우저 로컬스토리지에 저장됩니다.</p>
+        </div>
+        <input id="imageInput" type="file" accept="image/*" multiple />
+      </div>
+      <div class="thumb-grid" id="imageGrid"></div>
+    </section>
+
+    <section class="panel stretch">
+      <div class="panel-header">
+        <h2>라벨링 워크스페이스</h2>
+        <div class="flex gap">
+          <select id="activeLabel"></select>
+          <button id="autoLabelBtn" class="ghost">오토 라벨링</button>
+          <button id="deleteAnnoBtn" class="danger ghost">선택 삭제</button>
+        </div>
+      </div>
+      <div class="workspace">
+        <div id="canvasWrap" class="canvas-wrap">
+          <img id="mainImage" alt="선택된 이미지" />
+          <canvas id="drawCanvas"></canvas>
+        </div>
+        <div class="card annotations">
+          <div class="section-title">
+            <h3>어노테이션</h3>
+          </div>
+          <ul id="annotationList" class="list" aria-live="polite"></ul>
+        </div>
+      </div>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
