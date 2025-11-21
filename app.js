@@ -21,9 +21,19 @@ const elements = {
   imageCount: document.getElementById('imageCount')
 };
 
+const settingsInputs = {
+  detectorSource: document.getElementById('detectorSource'),
+  detectorEndpoint: document.getElementById('detectorEndpoint'),
+  detectorToken: document.getElementById('detectorToken'),
+  samEndpoint: document.getElementById('samEndpoint'),
+  samToken: document.getElementById('samToken'),
+  saveBtn: document.getElementById('saveSettingsBtn')
+};
+
 let drawing = false;
 let startPoint = null;
 let selectedAnnotation = null;
+let detectorModelPromise = null;
 
 init();
 
@@ -33,9 +43,11 @@ function init() {
   elements.imageInput.addEventListener('change', onUploadImages);
   elements.activeLabel.addEventListener('change', () => highlightActiveLabel());
   elements.autoLabelBtn.addEventListener('click', onAutoLabel);
+  document.getElementById('samBtn')?.addEventListener('click', onSamLabel);
   elements.deleteAnnoBtn.addEventListener('click', onDeleteSelected);
   elements.resetBtn.addEventListener('click', resetAll);
   elements.exportBtn.addEventListener('click', exportJson);
+  settingsInputs.saveBtn.addEventListener('click', onSaveSettings);
 
   elements.canvas.addEventListener('pointerdown', onPointerDown);
   window.addEventListener('pointermove', onPointerMove);
@@ -45,16 +57,40 @@ function init() {
   renderLabels();
   renderImages();
   renderWorkspace();
+  renderSettings();
 }
 
 function loadState() {
   try {
     const saved = localStorage.getItem('labeling-state');
-    if (saved) return JSON.parse(saved);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      const defaults = defaultState();
+      return {
+        ...defaults,
+        ...parsed,
+        settings: { ...defaults.settings, ...(parsed.settings || {}) }
+      };
+    }
   } catch (err) {
     console.warn('Failed to load state', err);
   }
-  return { projects: [], currentProjectId: null, currentImageId: null };
+  return defaultState();
+}
+
+function defaultState() {
+  return {
+    projects: [],
+    currentProjectId: null,
+    currentImageId: null,
+    settings: {
+      detectorSource: 'browser',
+      detectorEndpoint: '',
+      detectorToken: '',
+      samEndpoint: '',
+      samToken: ''
+    }
+  };
 }
 
 function saveState() {
@@ -110,7 +146,11 @@ function renderProjects() {
       renderImages();
       renderWorkspace();
     });
-    right.append(count, btn);
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'small ghost danger';
+    deleteBtn.textContent = '삭제';
+    deleteBtn.addEventListener('click', () => deleteProject(project.id));
+    right.append(count, btn, deleteBtn);
     li.append(info, right);
     if (state.currentProjectId === project.id) li.classList.add('active');
     elements.projectList.appendChild(li);
@@ -134,7 +174,12 @@ function renderLabels() {
   if (!project) return;
   project.labels.forEach((label) => {
     const li = document.createElement('li');
-    li.textContent = label;
+    li.innerHTML = `<span>${label}</span>`;
+    const removeBtn = document.createElement('button');
+    removeBtn.textContent = '삭제';
+    removeBtn.className = 'small ghost danger';
+    removeBtn.addEventListener('click', () => deleteLabel(label));
+    li.appendChild(removeBtn);
     elements.labelList.appendChild(li);
     const option = document.createElement('option');
     option.value = label;
@@ -262,6 +307,38 @@ function highlightActiveLabel() {
   elements.activeLabel.classList.add('accented');
 }
 
+function deleteLabel(label) {
+  const project = getCurrentProject();
+  if (!project) return;
+  if (!confirm(`${label} 라벨을 삭제하고 관련 어노테이션을 제거할까요?`)) return;
+  project.labels = project.labels.filter((l) => l !== label);
+  project.images.forEach((img) => {
+    img.annotations = img.annotations.filter((a) => a.label !== label);
+  });
+  if (elements.activeLabel.value === label) {
+    elements.activeLabel.value = project.labels[0] || '';
+  }
+  saveState();
+  renderLabels();
+  renderWorkspace();
+}
+
+function deleteProject(projectId) {
+  const project = state.projects.find((p) => p.id === projectId);
+  if (!project) return;
+  if (!confirm(`${project.name} 프로젝트를 삭제할까요?`)) return;
+  state.projects = state.projects.filter((p) => p.id !== projectId);
+  if (state.currentProjectId === projectId) {
+    state.currentProjectId = state.projects[0]?.id || null;
+    state.currentImageId = state.currentProjectId ? (state.projects[0].images[0]?.id || null) : null;
+  }
+  saveState();
+  renderProjects();
+  renderLabels();
+  renderImages();
+  renderWorkspace();
+}
+
 function onPointerDown(event) {
   const image = getCurrentImage();
   if (!image) return;
@@ -363,53 +440,161 @@ function fmtRect(rect) {
 async function onAutoLabel() {
   const image = getCurrentImage();
   if (!image) return alert('이미지를 먼저 선택하세요.');
-  const label = elements.activeLabel.value;
-  const bbox = await detectMainRegion(image.dataUrl);
-  const annotation = { id: crypto.randomUUID(), label, ...bbox };
-  image.annotations.push(annotation);
-  saveState();
-  renderWorkspace();
+  try {
+    const results = await runDetector(image);
+    if (!results.length) return alert('감지된 객체가 없습니다.');
+    image.annotations.push(...results.map((bbox) => ({ id: crypto.randomUUID(), ...bbox })));
+    saveState();
+    renderWorkspace();
+  } catch (err) {
+    console.error(err);
+    alert('오토라벨링 중 오류가 발생했습니다. 콘솔을 확인하세요.');
+  }
 }
 
-async function detectMainRegion(dataUrl) {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      canvas.width = img.width;
-      canvas.height = img.height;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0);
-      const data = ctx.getImageData(0, 0, img.width, img.height).data;
+async function runDetector(image) {
+  const settings = state.settings || defaultState().settings;
+  if (settings.detectorSource === 'remote' && settings.detectorEndpoint) {
+    return runRemoteDetector(image, settings);
+  }
+  return runBrowserDetector(image);
+}
 
-      let minX = img.width, minY = img.height, maxX = 0, maxY = 0, count = 0;
-      for (let y = 0; y < img.height; y++) {
-        for (let x = 0; x < img.width; x++) {
-          const idx = (y * img.width + x) * 4;
-          const [r, g, b, a] = [data[idx], data[idx + 1], data[idx + 2], data[idx + 3]];
-          const bright = (r + g + b) / 3;
-          if (a > 15 && bright < 240) {
-            minX = Math.min(minX, x);
-            minY = Math.min(minY, y);
-            maxX = Math.max(maxX, x);
-            maxY = Math.max(maxY, y);
-            count++;
-          }
+async function runBrowserDetector(image) {
+  const model = await loadBrowserDetector();
+  const imgEl = await loadImageElement(image.dataUrl);
+  const predictions = await model.detect(imgEl);
+  const width = image.width || imgEl.naturalWidth;
+  const height = image.height || imgEl.naturalHeight;
+  return predictions
+    .filter((p) => p.score >= 0.4)
+    .map((p) => ({
+      label: p.class || elements.activeLabel.value,
+      x: p.bbox[0] / width,
+      y: p.bbox[1] / height,
+      w: p.bbox[2] / width,
+      h: p.bbox[3] / height
+    }));
+}
+
+async function loadBrowserDetector() {
+  if (!detectorModelPromise) {
+    detectorModelPromise = new Promise(async (resolve, reject) => {
+      try {
+        if (!window.tf) {
+          await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.19.0/dist/tf.min.js');
         }
+        if (!window.cocoSsd) {
+          await loadScript('https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd');
+        }
+        const model = await cocoSsd.load();
+        resolve(model);
+      } catch (err) {
+        detectorModelPromise = null;
+        reject(err);
       }
+    });
+  }
+  return detectorModelPromise;
+}
 
-      if (!count) {
-        resolve({ x: 0.1, y: 0.1, w: 0.3, h: 0.3 });
-        return;
-      }
-      resolve({
-        x: minX / img.width,
-        y: minY / img.height,
-        w: (maxX - minX) / img.width,
-        h: (maxY - minY) / img.height
-      });
-    };
+async function loadScript(src) {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = src;
+    script.onload = () => resolve();
+    script.onerror = reject;
+    document.head.appendChild(script);
+  });
+}
+
+async function loadImageElement(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
     img.src = dataUrl;
+  });
+}
+
+async function runRemoteDetector(image, settings) {
+  const response = await fetch(settings.detectorEndpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(settings.detectorToken ? { Authorization: settings.detectorToken } : {})
+    },
+    body: JSON.stringify({ image: image.dataUrl })
+  });
+  if (!response.ok) throw new Error('원격 오토라벨 엔드포인트 호출 실패');
+  const data = await response.json();
+  const boxes = data.boxes || [];
+  const width = image.width;
+  const height = image.height;
+  return boxes.map((b) => {
+    const [x1, y1, x2, y2] = b.box;
+    const isNormalized = x2 <= 1 && y2 <= 1;
+    const w = isNormalized ? x2 - x1 : (x2 - x1) / width;
+    const h = isNormalized ? y2 - y1 : (y2 - y1) / height;
+    return {
+      label: b.label || elements.activeLabel.value,
+      x: isNormalized ? x1 : x1 / width,
+      y: isNormalized ? y1 : y1 / height,
+      w,
+      h
+    };
+  });
+}
+
+async function onSamLabel() {
+  const image = getCurrentImage();
+  if (!image) return alert('이미지를 먼저 선택하세요.');
+  const settings = state.settings || defaultState().settings;
+  if (!settings.samEndpoint) return alert('SAM 엔드포인트 URL을 설정하세요.');
+  const prompt = selectedAnnotation
+    ? image.annotations.find((a) => a.id === selectedAnnotation)
+    : null;
+  const box = prompt
+    ? [prompt.x, prompt.y, prompt.x + prompt.w, prompt.y + prompt.h]
+    : [0.25, 0.25, 0.75, 0.75];
+  try {
+    const samBoxes = await runSamRequest(image, settings, box);
+    if (!samBoxes.length) return alert('SAM 결과가 없습니다.');
+    image.annotations.push(
+      ...samBoxes.map((b) => ({ id: crypto.randomUUID(), label: b.label || elements.activeLabel.value, ...b }))
+    );
+    saveState();
+    renderWorkspace();
+  } catch (err) {
+    console.error(err);
+    alert('SAM 호출 중 오류가 발생했습니다. 엔드포인트 설정을 확인하세요.');
+  }
+}
+
+async function runSamRequest(image, settings, promptBox) {
+  const response = await fetch(settings.samEndpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(settings.samToken ? { Authorization: settings.samToken } : {})
+    },
+    body: JSON.stringify({ image: image.dataUrl, box: promptBox })
+  });
+  if (!response.ok) throw new Error('SAM 엔드포인트 호출 실패');
+  const data = await response.json();
+  const boxes = data.boxes || (data.box ? [data.box] : []);
+  return boxes.map((b) => {
+    const [x1, y1, x2, y2] = b.box || b;
+    const isNormalized = x2 <= 1 && y2 <= 1;
+    const width = image.width;
+    const height = image.height;
+    return {
+      label: b.label,
+      x: isNormalized ? x1 : x1 / width,
+      y: isNormalized ? y1 : y1 / height,
+      w: isNormalized ? x2 - x1 : (x2 - x1) / width,
+      h: isNormalized ? y2 - y1 : (y2 - y1) / height
+    };
   });
 }
 
@@ -424,14 +609,17 @@ function onDeleteSelected() {
 
 function resetAll() {
   if (!confirm('모든 프로젝트와 라벨을 삭제할까요?')) return;
-  state.projects = [];
-  state.currentImageId = null;
-  state.currentProjectId = null;
+  const fresh = defaultState();
+  state.projects = fresh.projects;
+  state.currentImageId = fresh.currentImageId;
+  state.currentProjectId = fresh.currentProjectId;
+  state.settings = fresh.settings;
   saveState();
   renderProjects();
   renderLabels();
   renderImages();
   renderWorkspace();
+  renderSettings();
 }
 
 function exportJson() {
@@ -443,4 +631,26 @@ function exportJson() {
   a.download = 'annotations.json';
   a.click();
   URL.revokeObjectURL(url);
+}
+
+function renderSettings() {
+  const settings = state.settings || defaultState().settings;
+  settingsInputs.detectorSource.value = settings.detectorSource;
+  settingsInputs.detectorEndpoint.value = settings.detectorEndpoint;
+  settingsInputs.detectorToken.value = settings.detectorToken;
+  settingsInputs.samEndpoint.value = settings.samEndpoint;
+  settingsInputs.samToken.value = settings.samToken;
+}
+
+function onSaveSettings() {
+  state.settings = {
+    detectorSource: settingsInputs.detectorSource.value,
+    detectorEndpoint: settingsInputs.detectorEndpoint.value.trim(),
+    detectorToken: settingsInputs.detectorToken.value.trim(),
+    samEndpoint: settingsInputs.samEndpoint.value.trim(),
+    samToken: settingsInputs.samToken.value.trim()
+  };
+  detectorModelPromise = null;
+  saveState();
+  alert('모델 설정이 저장되었습니다.');
 }
